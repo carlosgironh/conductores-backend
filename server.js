@@ -15,11 +15,29 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// =============================
+// 🟢 ROOT
+// =============================
 app.get("/", (req, res) => {
   res.send("API de Conductores funcionando 🚗");
 });
 
-// Crear conductor
+// =============================
+// 🔐 MIDDLEWARE ADMIN
+// =============================
+function verificarAdmin(req, res, next) {
+  const password = req.headers["admin-password"];
+
+  if (!password || password !== process.env.ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "No autorizado" });
+  }
+
+  next();
+}
+
+// =============================
+// 🟢 REGISTRO PÚBLICO CONDUCTOR
+// =============================
 app.post("/api/conductores", async (req, res) => {
   try {
     const {
@@ -31,7 +49,8 @@ app.post("/api/conductores", async (req, res) => {
       poliza_numero,
       poliza_tipo,
       celular,
-      direccion
+      direccion,
+      auth_user_id // 🔐 nuevo
     } = req.body;
 
     const { data, error } = await supabase
@@ -45,7 +64,8 @@ app.post("/api/conductores", async (req, res) => {
         poliza_numero,
         poliza_tipo,
         celular,
-        direccion
+        direccion,
+        auth_user_id
       }])
       .select()
       .single();
@@ -54,12 +74,14 @@ app.post("/api/conductores", async (req, res) => {
 
     res.json({ conductor: data });
   } catch (err) {
-    console.error(err);
+    console.error("Error creando conductor:", err);
     res.status(500).json({ error: "Error creando conductor" });
   }
 });
 
-// Obtener perfil público
+// =============================
+// 🟢 PERFIL PÚBLICO (QR)
+// =============================
 app.get("/api/conductores/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -78,25 +100,25 @@ app.get("/api/conductores/:id", async (req, res) => {
     const { data: quejas } = await supabase
       .from("quejas")
       .select("*")
-      .eq("conductor_id", id);
+      .eq("conductor_id", id)
+      .order("fecha", { ascending: false });
 
     res.json({ conductor, documentos, quejas });
   } catch (err) {
-    console.error(err);
+    console.error("Error perfil público:", err);
     res.status(500).json({ error: "Error obteniendo datos" });
   }
 });
 
-// Subir documento
+// =============================
+// 🟢 SUBIR DOCUMENTOS (PÚBLICO)
+// =============================
 app.post("/api/documentos/:conductorId/:tipo", upload.single("archivo"), async (req, res) => {
   try {
     const { conductorId, tipo } = req.params;
     const file = req.file;
 
-    if (!file) {
-      console.log("❌ NO SE RECIBIÓ ARCHIVO");
-      return res.status(400).json({ error: "No se recibió archivo" });
-    }
+    if (!file) return res.status(400).json({ error: "No se recibió archivo" });
 
     const tiposPermitidos = [
       "licencia",
@@ -116,10 +138,7 @@ app.post("/api/documentos/:conductorId/:tipo", upload.single("archivo"), async (
       .from("documentos-conductores")
       .upload(filePath, file.buffer, { contentType: file.mimetype });
 
-    if (uploadError) {
-      console.error("❌ ERROR SUPABASE STORAGE:", uploadError);
-      return res.status(500).json({ error: uploadError.message });
-    }
+    if (uploadError) throw uploadError;
 
     const { data } = supabase.storage
       .from("documentos-conductores")
@@ -134,10 +153,80 @@ app.post("/api/documentos/:conductorId/:tipo", upload.single("archivo"), async (
     res.json({ mensaje: "Documento subido", url: data.publicUrl });
 
   } catch (err) {
-    console.error(err);
+    console.error("Error subiendo documento:", err);
     res.status(500).json({ error: "Error subiendo documento" });
   }
 });
 
+// =============================
+// 🟢 CREAR QUEJAS (PÚBLICO)
+// =============================
+app.post("/api/quejas", async (req, res) => {
+  try {
+    const { conductor_id, descripcion } = req.body;
+
+    if (!conductor_id || !descripcion) {
+      return res.status(400).json({ error: "Datos incompletos" });
+    }
+
+    const { error } = await supabase.from("quejas").insert([{
+      conductor_id,
+      descripcion,
+      fecha: new Date()
+    }]);
+
+    if (error) throw error;
+
+    res.json({ mensaje: "Queja enviada correctamente" });
+
+  } catch (err) {
+    console.error("Error guardando queja:", err);
+    res.status(500).json({ error: "Error guardando queja" });
+  }
+});
+
+// =============================
+// 🔒 ADMIN: BUSCAR CONDUCTORES
+// =============================
+app.get("/api/admin/conductores", verificarAdmin, async (req, res) => {
+  try {
+    const { q } = req.query;
+
+    const { data, error } = await supabase
+      .from("conductores")
+      .select("*")
+      .ilike("cedula", `%${q}%`);
+
+    if (error) throw error;
+
+    res.json(data);
+  } catch (err) {
+    console.error("Error búsqueda admin:", err);
+    res.status(500).json({ error: "Error buscando conductores" });
+  }
+});
+
+// =============================
+// 🔒 ADMIN: VER DOCUMENTOS
+// =============================
+app.get("/api/admin/documentos/:conductorId", verificarAdmin, async (req, res) => {
+  try {
+    const { conductorId } = req.params;
+
+    const { data, error } = await supabase
+      .from("documentos")
+      .select("*")
+      .eq("conductor_id", conductorId);
+
+    if (error) throw error;
+
+    res.json(data);
+  } catch (err) {
+    console.error("Error docs admin:", err);
+    res.status(500).json({ error: "Error obteniendo documentos" });
+  }
+});
+
+// =============================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Servidor corriendo en puerto " + PORT));
