@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
+const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
@@ -15,260 +16,98 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// =====================================================
-// 🟢 ROOT
-// =====================================================
+// ================= ROOT =================
 app.get("/", (req, res) => {
-  res.send("API de Conductores funcionando 🚗");
+  res.send("API Conductores funcionando 🚗");
 });
 
-// =====================================================
-// 🔐 MIDDLEWARE ADMIN
-// =====================================================
-function verificarAdmin(req, res, next) {
-  const password = req.headers["admin-password"];
-
-  if (!password || password !== process.env.ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "No autorizado" });
-  }
-
-  next();
-}
-
-// =====================================================
-// 🟢 REGISTRO CONDUCTOR
-// =====================================================
-app.post("/api/conductores", async (req, res) => {
+// ================= REGISTRO =================
+app.post("/api/registro", async (req, res) => {
   try {
     const {
-      nombres,
-      apellidos,
-      cedula,
-      licencia,
-      placa,
-      modelo,
-      marca,
-      color,
-      poliza_numero,
-      poliza_tipo,
-      celular,
-      direccion,
-      qr_token,
-      auth_user_id
+      email, password, nombres, apellidos, cedula, licencia,
+      placa, modelo, marca, color, poliza_numero, celular, direccion
     } = req.body;
 
-    if (!qr_token) {
-      return res.status(400).json({ error: "QR token requerido" });
-    }
+    if(!email || !password) return res.status(400).json({ error: "Email y password requeridos" });
 
-    const { data, error } = await supabase
+    // Crear usuario Auth en Supabase
+    const { data: userData, error: userError } = await supabase.auth.admin.createUser({
+      email, password, email_confirm: true
+    });
+    if(userError) return res.status(400).json({ error: userError.message });
+
+    const userId = userData.user.id;
+    const qr_token = crypto.randomBytes(16).toString("hex"); // Token único para perfil público
+
+    // Insertar conductor
+    const { data: conductor, error: conductorError } = await supabase
       .from("conductores")
-      .insert([{
-        nombres,
-        apellidos,
-        cedula,
-        licencia,
-        placa,
-        modelo,
-        marca,
-        color,
-        poliza_numero,
-        poliza_tipo,
-        celular,
-        direccion,
-        qr_token,
-        auth_user_id
-      }])
+      .insert([{ nombres, apellidos, cedula, licencia, placa, modelo, marca, color, poliza_numero, celular, direccion, auth_user_id: userId, qr_token }])
       .select()
       .single();
 
-    if (error) throw error;
+    if(conductorError) return res.status(400).json({ error: conductorError.message });
 
-    res.json({ conductor: data });
+    res.json({ mensaje:"Conductor registrado", conductorId: conductor.id, qr_token });
 
-  } catch (err) {
-    console.error("Error creando conductor:", err);
-    res.status(500).json({ error: "Error creando conductor" });
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ error:"Error en registro" });
   }
 });
 
-// =====================================================
-// 🟢 PERFIL PÚBLICO POR TOKEN (QR)
-// =====================================================
-app.get("/api/perfil/:token", async (req, res) => {
+// ================= SUBIDA DOCUMENTOS =================
+app.post("/api/documentos/:conductorId/:tipo", upload.single("archivo"), async (req,res)=>{
+  try {
+    const { conductorId, tipo } = req.params;
+    if(!req.file) return res.status(400).json({ error:"Archivo requerido" });
+
+    const { data, error } = await supabase.storage.from("documentos").upload(
+      `${conductorId}/${tipo}_${Date.now()}`,
+      req.file.buffer
+    );
+
+    if(error) return res.status(400).json({ error: error.message });
+
+    const url_archivo = `${process.env.SUPABASE_URL}/storage/v1/object/public/documentos/${data.path}`;
+    await supabase.from("documentos").insert([{ conductor_id: conductorId, tipo, url_archivo }]);
+
+    res.json({ mensaje:"Archivo subido", url_archivo });
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ error:"Error subiendo archivo" });
+  }
+});
+
+// ================= PERFIL PÚBLICO =================
+app.get("/api/perfil/:token", async (req,res)=>{
   try {
     const { token } = req.params;
+    const { data: conductor, error } = await supabase.from("conductores").select("*").eq("qr_token", token).single();
+    if(error || !conductor) return res.status(404).json({ error:"No encontrado" });
 
-    const { data: conductor, error } = await supabase
-      .from("conductores")
-      .select("*")
-      .eq("qr_token", token)
-      .single();
+    const { data: documentos } = await supabase.from("documentos").select("*").eq("conductor_id", conductor.id);
+    res.json({ conductor, documentos: documentos || [] });
 
-    if (error || !conductor) {
-      return res.status(404).json({ error: "Conductor no encontrado" });
-    }
-
-    const { data: documentos } = await supabase
-      .from("documentos")
-      .select("*")
-      .eq("conductor_id", conductor.id);
-
-    const { data: quejas } = await supabase
-      .from("quejas")
-      .select("*")
-      .eq("conductor_id", conductor.id)
-      .order("fecha", { ascending: false });
-
-    res.json({
-      conductor,
-      documentos: documentos || [],
-      quejas: quejas || []
-    });
-
-  } catch (err) {
-    console.error("Error perfil público:", err);
-    res.status(500).json({ error: "Error obteniendo datos" });
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ error:"Error cargando perfil" });
   }
 });
 
-// =====================================================
-// 🟢 SUBIR DOCUMENTOS
-// =====================================================
-app.post(
-  "/api/documentos/:conductorId/:tipo",
-  upload.single("archivo"),
-  async (req, res) => {
-    try {
-      const { conductorId, tipo } = req.params;
-      const file = req.file;
+// ================= DASHBOARD / ADMIN =================
+function verificarAdmin(req,res,next){
+  const pass = req.headers["admin-password"];
+  if(!pass || pass !== process.env.ADMIN_PASSWORD) return res.status(401).json({ error:"No autorizado" });
+  next();
+}
 
-      if (!file) {
-        return res.status(400).json({ error: "No se recibió archivo" });
-      }
-
-      const tiposPermitidos = [
-        "CEDULA",
-        "LICENCIA",
-        "REGISTRO_VEHICULAR",
-        "POLIZA_VEHICULAR",
-        "FOTO_VEHICULO",
-        "FOTO_CONDUCTOR",
-        "PAZ_Y_SALVO",
-        "REVISADO_VEHICULAR"
-      ];
-
-      if (!tiposPermitidos.includes(tipo)) {
-        return res.status(400).json({ error: "Tipo de documento no válido" });
-      }
-
-      const filePath = `${conductorId}/${tipo}_${Date.now()}_${file.originalname}`;
-
-      const { error: uploadError } = await supabase.storage
-        .from("documentos-conductores")
-        .upload(filePath, file.buffer, {
-          contentType: file.mimetype
-        });
-
-      if (uploadError) throw uploadError;
-
-      const { data } = supabase.storage
-        .from("documentos-conductores")
-        .getPublicUrl(filePath);
-
-      const { error: insertError } = await supabase
-        .from("documentos")
-        .insert([{
-          conductor_id: conductorId,
-          tipo,
-          url_archivo: data.publicUrl
-        }]);
-
-      if (insertError) throw insertError;
-
-      res.json({
-        mensaje: "Documento subido correctamente",
-        url: data.publicUrl
-      });
-
-    } catch (err) {
-      console.error("Error subiendo documento:", err);
-      res.status(500).json({ error: "Error subiendo documento" });
-    }
-  }
-);
-
-// =====================================================
-// 🟢 CREAR QUEJAS
-// =====================================================
-app.post("/api/quejas", async (req, res) => {
-  try {
-    const { conductor_id, descripcion } = req.body;
-
-    if (!conductor_id || !descripcion) {
-      return res.status(400).json({ error: "Datos incompletos" });
-    }
-
-    const { error } = await supabase.from("quejas").insert([{
-      conductor_id,
-      descripcion,
-      fecha: new Date()
-    }]);
-
-    if (error) throw error;
-
-    res.json({ mensaje: "Queja enviada correctamente" });
-
-  } catch (err) {
-    console.error("Error guardando queja:", err);
-    res.status(500).json({ error: "Error guardando queja" });
-  }
+app.get("/api/admin/conductores", verificarAdmin, async (req,res)=>{
+  const { q } = req.query;
+  const { data } = await supabase.from("conductores").select("*").ilike("cedula", `%${q||""}%`);
+  res.json(data || []);
 });
 
-// =====================================================
-// 🔒 ADMIN: BUSCAR CONDUCTORES
-// =====================================================
-app.get("/api/admin/conductores", verificarAdmin, async (req, res) => {
-  try {
-    const { q } = req.query;
-
-    const { data, error } = await supabase
-      .from("conductores")
-      .select("*")
-      .ilike("cedula", `%${q}%`);
-
-    if (error) throw error;
-
-    res.json(data);
-
-  } catch (err) {
-    console.error("Error búsqueda admin:", err);
-    res.status(500).json({ error: "Error buscando conductores" });
-  }
-});
-
-// =====================================================
-// 🔒 ADMIN: VER DOCUMENTOS
-// =====================================================
-app.get("/api/admin/documentos/:conductorId", verificarAdmin, async (req, res) => {
-  try {
-    const { conductorId } = req.params;
-
-    const { data, error } = await supabase
-      .from("documentos")
-      .select("*")
-      .eq("conductor_id", conductorId);
-
-    if (error) throw error;
-
-    res.json(data);
-
-  } catch (err) {
-    console.error("Error docs admin:", err);
-    res.status(500).json({ error: "Error obteniendo documentos" });
-  }
-});
-
-// =====================================================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Servidor corriendo en puerto " + PORT));
+app.listen(PORT,()=>console.log("Servidor corriendo en puerto " + PORT));
