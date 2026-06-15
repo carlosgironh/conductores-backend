@@ -1,6 +1,6 @@
 // routes/yappy.js
 // ============================================================
-// API Yappy para Render — Reemplaza completamente la Edge Function de Supabase
+// API Yappy para Render — v2.1 (fix 403 Unauthorized)
 // Endpoint: POST https://conductores-api.onrender.com/api/yappy
 // ============================================================
 
@@ -14,10 +14,13 @@ const SECRET_KEY = process.env.YAPPY_SECRET_KEY;
 // ─── Verificar variables de entorno al iniciar ───
 console.log('[YAPPY CONFIG] Verificando variables de entorno...');
 console.log('[YAPPY CONFIG] COMMERCE_ID:', COMMERCE_ID ? '✓ Configurado (' + COMMERCE_ID.slice(0, 8) + '...)' : '✗ NO CONFIGURADO');
-console.log('[YAPPY CONFIG] SECRET_KEY:', SECRET_KEY ? '✓ Configurado' : '✗ NO CONFIGURADO');
+console.log('[YAPPY CONFIG] SECRET_KEY:', SECRET_KEY ? '✓ Configurado (' + SECRET_KEY.slice(0, 8) + '...)' : '✗ NO CONFIGURADO');
 
 if (!COMMERCE_ID) {
-  console.error('[YAPPY CONFIG] ⚠️ ERROR: YAPPY_COMMERCE_ID no está configurado. Las llamadas a Yappy fallarán.');
+  console.error('[YAPPY CONFIG] ⚠️ ERROR: YAPPY_COMMERCE_ID no está configurado.');
+}
+if (!SECRET_KEY) {
+  console.error('[YAPPY CONFIG] ⚠️ ADVERTENCIA: YAPPY_SECRET_KEY no está configurado. Esto puede causar 403.');
 }
 
 // ─── CORS Middleware ───
@@ -54,7 +57,7 @@ router.post('/', async (req, res) => {
     console.error('[YAPPY API] ERROR: YAPPY_COMMERCE_ID no está configurado');
     return res.status(500).json({
       error: 'Server configuration error',
-      message: 'YAPPY_COMMERCE_ID no está configurado. Ve a Render Dashboard → Environment Variables.',
+      message: 'YAPPY_COMMERCE_ID no está configurado.',
     });
   }
 
@@ -151,13 +154,25 @@ router.post('/', async (req, res) => {
       console.log('[YAPPY] Authorization header:', authHeader.slice(0, 60) + '...');
       console.log('[YAPPY] Request body:', JSON.stringify(requestBody));
 
+      // ─── Headers para Yappy (incluyendo secretKey si está configurado) ───
+      const yappyHeaders = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': authHeader,
+      };
+
+      // Si tenemos SECRET_KEY, agregarlo como header adicional
+      // (Yappy puede requerirlo para validar el comercio en el paso 2)
+      if (SECRET_KEY) {
+        yappyHeaders['X-Secret-Key'] = SECRET_KEY;
+        console.log('[YAPPY] X-Secret-Key header agregado');
+      }
+
+      console.log('[YAPPY] Headers completos:', JSON.stringify(yappyHeaders));
+
       const yappyRes = await fetch(`${YAPPY_API_BASE}/payments/payment-wc`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': authHeader,
-        },
+        headers: yappyHeaders,
         body: JSON.stringify(requestBody),
       });
 
@@ -170,6 +185,27 @@ router.post('/', async (req, res) => {
         yappyData = JSON.parse(responseText);
       } catch (e) {
         yappyData = { raw: responseText };
+      }
+
+      // Si falla con 403, intentar con endpoint alternativo
+      if (yappyRes.status === 403 && SECRET_KEY) {
+        console.log('[YAPPY] ⚠️ 403 con payment-wc. Intentando con endpoint alternativo...');
+
+        const altRes = await fetch(`${YAPPY_API_BASE}/payments/payment`, {
+          method: 'POST',
+          headers: yappyHeaders,
+          body: JSON.stringify(requestBody),
+        });
+
+        const altText = await altRes.text();
+        console.log('[YAPPY] HTTP Status (alt):', altRes.status);
+        console.log('[YAPPY] Respuesta alt:', altText);
+
+        if (altRes.status !== 403) {
+          let altData;
+          try { altData = JSON.parse(altText); } catch (e) { altData = { raw: altText }; }
+          return res.status(altRes.status).json(altData);
+        }
       }
 
       return res.status(yappyRes.status).json(yappyData);
