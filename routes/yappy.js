@@ -1,6 +1,6 @@
 // routes/yappy.js
 // ============================================================
-// API Yappy para Render — v2.1 (fix 403 Unauthorized)
+// API Yappy para Render — v3.0 (fix 403 - secretKey en body)
 // Endpoint: POST https://conductores-api.onrender.com/api/yappy
 // ============================================================
 
@@ -20,7 +20,7 @@ if (!COMMERCE_ID) {
   console.error('[YAPPY CONFIG] ⚠️ ERROR: YAPPY_COMMERCE_ID no está configurado.');
 }
 if (!SECRET_KEY) {
-  console.error('[YAPPY CONFIG] ⚠️ ADVERTENCIA: YAPPY_SECRET_KEY no está configurado. Esto puede causar 403.');
+  console.error('[YAPPY CONFIG] ⚠️ ADVERTENCIA: YAPPY_SECRET_KEY no está configurado.');
 }
 
 // ─── CORS Middleware ───
@@ -137,6 +137,10 @@ router.post('/', async (req, res) => {
         return res.status(400).json({ error: 'yappyToken es requerido' });
       }
 
+      // ─── Body del request a Yappy ───
+      // Según la documentación, el paso 2 requiere:
+      // merchantId, orderId, domain, paymentDate, aliasYappy, ipnUrl, discount, taxes, subtotal, total
+      // Y posiblemente secretKey en el body
       const requestBody = {
         merchantId: COMMERCE_ID,
         orderId: orderId,
@@ -150,62 +154,78 @@ router.post('/', async (req, res) => {
         total: total,
       };
 
+      // Si tenemos SECRET_KEY, agregarlo al body (algunas APIs lo requieren aquí)
+      if (SECRET_KEY) {
+        requestBody.secretKey = SECRET_KEY;
+        console.log('[YAPPY] secretKey agregado al body');
+      }
+
       const authHeader = `Bearer ${yappyToken}`;
       console.log('[YAPPY] Authorization header:', authHeader.slice(0, 60) + '...');
       console.log('[YAPPY] Request body:', JSON.stringify(requestBody));
 
-      // ─── Headers para Yappy (incluyendo secretKey si está configurado) ───
+      // ─── Headers para Yappy ───
       const yappyHeaders = {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
         'Authorization': authHeader,
       };
 
-      // Si tenemos SECRET_KEY, agregarlo como header adicional
-      // (Yappy puede requerirlo para validar el comercio en el paso 2)
-      if (SECRET_KEY) {
-        yappyHeaders['X-Secret-Key'] = SECRET_KEY;
-        console.log('[YAPPY] X-Secret-Key header agregado');
-      }
+      console.log('[YAPPY] Headers:', JSON.stringify(yappyHeaders));
 
-      console.log('[YAPPY] Headers completos:', JSON.stringify(yappyHeaders));
-
-      const yappyRes = await fetch(`${YAPPY_API_BASE}/payments/payment-wc`, {
+      // ─── Intentar con /payments/payment-wc (documentación oficial) ───
+      console.log('[YAPPY] Intentando endpoint: /payments/payment-wc');
+      let yappyRes = await fetch(`${YAPPY_API_BASE}/payments/payment-wc`, {
         method: 'POST',
         headers: yappyHeaders,
         body: JSON.stringify(requestBody),
       });
 
-      const responseText = await yappyRes.text();
-      console.log('[YAPPY] HTTP Status:', yappyRes.status);
-      console.log('[YAPPY] Respuesta raw:', responseText);
+      let responseText = await yappyRes.text();
+      console.log('[YAPPY] HTTP Status (payment-wc):', yappyRes.status);
+      console.log('[YAPPY] Respuesta (payment-wc):', responseText);
+
+      // Si falla con 403, intentar con /payments/payment (alternativo)
+      if (yappyRes.status === 403) {
+        console.log('[YAPPY] ⚠️ 403 con payment-wc. Intentando /payments/payment...');
+
+        yappyRes = await fetch(`${YAPPY_API_BASE}/payments/payment`, {
+          method: 'POST',
+          headers: yappyHeaders,
+          body: JSON.stringify(requestBody),
+        });
+
+        responseText = await yappyRes.text();
+        console.log('[YAPPY] HTTP Status (payment):', yappyRes.status);
+        console.log('[YAPPY] Respuesta (payment):', responseText);
+      }
+
+      // Si sigue fallando, intentar SIN Authorization header (solo con secretKey en body)
+      if (yappyRes.status === 403 && SECRET_KEY) {
+        console.log('[YAPPY] ⚠️ Siguiente 403. Intentando sin Authorization header, solo secretKey...');
+
+        const bodyWithoutAuth = { ...requestBody };
+        delete bodyWithoutAuth.secretKey; // ya está en el body
+
+        yappyRes = await fetch(`${YAPPY_API_BASE}/payments/payment-wc`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          body: JSON.stringify(bodyWithoutAuth),
+        });
+
+        responseText = await yappyRes.text();
+        console.log('[YAPPY] HTTP Status (sin auth):', yappyRes.status);
+        console.log('[YAPPY] Respuesta (sin auth):', responseText);
+      }
 
       let yappyData;
       try {
         yappyData = JSON.parse(responseText);
       } catch (e) {
         yappyData = { raw: responseText };
-      }
-
-      // Si falla con 403, intentar con endpoint alternativo
-      if (yappyRes.status === 403 && SECRET_KEY) {
-        console.log('[YAPPY] ⚠️ 403 con payment-wc. Intentando con endpoint alternativo...');
-
-        const altRes = await fetch(`${YAPPY_API_BASE}/payments/payment`, {
-          method: 'POST',
-          headers: yappyHeaders,
-          body: JSON.stringify(requestBody),
-        });
-
-        const altText = await altRes.text();
-        console.log('[YAPPY] HTTP Status (alt):', altRes.status);
-        console.log('[YAPPY] Respuesta alt:', altText);
-
-        if (altRes.status !== 403) {
-          let altData;
-          try { altData = JSON.parse(altText); } catch (e) { altData = { raw: altText }; }
-          return res.status(altRes.status).json(altData);
-        }
       }
 
       return res.status(yappyRes.status).json(yappyData);
