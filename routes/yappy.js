@@ -1,17 +1,14 @@
 // routes/yappy.js
 // ============================================================
-// API Yappy para Render — v5.0 (prueba endpoint UAT)
-// Endpoint: POST https://conductores-api.onrender.com/api/yappy
+// API Yappy para Render — v6.0 (Single-step flow)
+// El frontend llama una vez con action="create-order"
+// La API hace validate + payment internamente
 // ============================================================
 
 const express = require('express');
 const router = express.Router();
 
-// ─── Endpoints ───
-const YAPPY_API_PROD = 'https://apipagosbg.bgeneral.cloud';
-const YAPPY_API_UAT = 'https://api-comecom-uat.yappycloud.com';
-const YAPPY_API_BASE = YAPPY_API_PROD; // Cambiar a UAT si es necesario
-
+const YAPPY_API_BASE = 'https://apipagosbg.bgeneral.cloud';
 const COMMERCE_ID = process.env.YAPPY_COMMERCE_ID;
 const SECRET_KEY_B64 = process.env.YAPPY_SECRET_KEY;
 
@@ -34,7 +31,6 @@ console.log('[YAPPY CONFIG] Verificando variables de entorno...');
 console.log('[YAPPY CONFIG] COMMERCE_ID:', COMMERCE_ID ? '✓ Configurado (' + COMMERCE_ID.slice(0, 8) + '...)' : '✗ NO CONFIGURADO');
 console.log('[YAPPY CONFIG] SECRET_KEY (raw):', SECRET_KEY_B64 ? '✓ Configurado (' + SECRET_KEY_B64.slice(0, 8) + '...)' : '✗ NO CONFIGURADO');
 console.log('[YAPPY CONFIG] SECRET_KEY (decoded):', SECRET_KEY ? '✓ Decodificado (' + SECRET_KEY.slice(0, 20) + '...)' : '✗ NO DISPONIBLE');
-console.log('[YAPPY CONFIG] API Base:', YAPPY_API_BASE);
 
 if (!COMMERCE_ID) {
   console.error('[YAPPY CONFIG] ⚠️ ERROR: YAPPY_COMMERCE_ID no está configurado.');
@@ -66,29 +62,6 @@ function extractEpochTime(token) {
   }
 }
 
-// ─── Helper: hacer request a Yappy con reintentos ───
-async function callYappy(endpoint, headers, body, apiBase = YAPPY_API_BASE) {
-  const url = `${apiBase}${endpoint}`;
-  console.log(`[YAPPY] Calling: ${url}`);
-  console.log('[YAPPY] Headers:', JSON.stringify(headers));
-  console.log('[YAPPY] Body:', JSON.stringify(body));
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  });
-
-  const text = await res.text();
-  console.log(`[YAPPY] Status: ${res.status}`);
-  console.log(`[YAPPY] Response: ${text}`);
-
-  let data;
-  try { data = JSON.parse(text); } catch (e) { data = { raw: text }; }
-
-  return { status: res.status, data };
-}
-
 // ─── POST /api/yappy ───
 router.post('/', async (req, res) => {
   const { action } = req.body;
@@ -106,67 +79,13 @@ router.post('/', async (req, res) => {
 
   try {
     // ═══════════════════════════════════════════════════════════
-    // PASO 1: Validar comercio
+    // FLUJO COMPLETO EN UN SOLO PASO
     // ═══════════════════════════════════════════════════════════
-    if (action === 'validate') {
-      const { urlDomain } = req.body;
-
-      console.log('[YAPPY] Paso 1: Validando comercio...');
-      console.log('[YAPPY] merchantId:', COMMERCE_ID);
-      console.log('[YAPPY] urlDomain:', urlDomain);
-
-      const requestBody = {
-        merchantId: COMMERCE_ID,
-        urlDomain: urlDomain,
-      };
-
-      // Intentar con PROD primero
-      let result = await callYappy(
-        '/payments/validate/merchant',
-        { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        requestBody,
-        YAPPY_API_PROD
-      );
-
-      // Si falla, intentar con UAT
-      if (result.status !== 200 || result.data.status?.code !== '0000') {
-        console.log('[YAPPY] PROD falló. Intentando UAT...');
-        result = await callYappy(
-          '/payments/validate/merchant',
-          { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-          requestBody,
-          YAPPY_API_UAT
-        );
-      }
-
-      if (result.status !== 200 || result.data.status?.code !== '0000') {
-        console.error('[YAPPY] Yappy rechazó validación:', result.data.status || result.data);
-        return res.status(400).json({
-          error: 'Yappy validation failed',
-          details: result.data.status || result.data,
-          raw: result.data,
-        });
-      }
-
-      const epochTime = extractEpochTime(result.data.body?.token);
-
-      return res.json({
-        status: result.data.status,
-        body: result.data.body,
-        epochTime: epochTime,
-        apiUsed: result.status === 200 ? 'PROD' : 'UAT',
-      });
-    }
-
-    // ═══════════════════════════════════════════════════════════
-    // PASO 2: Crear orden de pago
-    // ═══════════════════════════════════════════════════════════
-    if (action === 'payment') {
+    if (action === 'create-order') {
       const {
-        yappyToken,
+        urlDomain,
         orderId,
         domain,
-        paymentDate,
         aliasYappy,
         ipnUrl,
         discount,
@@ -175,22 +94,57 @@ router.post('/', async (req, res) => {
         total,
       } = req.body;
 
-      console.log('[YAPPY] Paso 2: Creando orden...');
+      console.log('[YAPPY] === FLUJO COMPLETO EN UN SOLO PASO ===');
+      console.log('[YAPPY] merchantId:', COMMERCE_ID);
+      console.log('[YAPPY] urlDomain:', urlDomain);
       console.log('[YAPPY] orderId:', orderId);
-      console.log('[YAPPY] paymentDate:', paymentDate);
       console.log('[YAPPY] total:', total);
-      console.log('[YAPPY] yappyToken (primeros 50 chars):', yappyToken ? yappyToken.slice(0, 50) + '...' : 'VACÍO');
 
-      if (!yappyToken) {
-        console.error('[YAPPY] ERROR: yappyToken está vacío');
-        return res.status(400).json({ error: 'yappyToken es requerido' });
+      // ─── PASO 1: Validar comercio (interno) ───
+      console.log('[YAPPY] [1/2] Validando comercio...');
+
+      const validateRes = await fetch(`${YAPPY_API_BASE}/payments/validate/merchant`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({
+          merchantId: COMMERCE_ID,
+          urlDomain: urlDomain,
+        }),
+      });
+
+      const validateData = await validateRes.json();
+      console.log('[YAPPY] [1/2] Respuesta validate:', JSON.stringify(validateData));
+
+      if (validateData.status?.code !== '0000') {
+        console.error('[YAPPY] [1/2] Yappy rechazó validación:', validateData.status);
+        return res.status(400).json({
+          error: 'Yappy validation failed',
+          details: validateData.status,
+          raw: validateData,
+        });
       }
 
-      const requestBody = {
+      const yappyToken = validateData.body?.token;
+      const epochTime = extractEpochTime(yappyToken);
+
+      if (!yappyToken) {
+        console.error('[YAPPY] [1/2] No se recibió token de Yappy');
+        return res.status(500).json({ error: 'No token received from Yappy' });
+      }
+
+      console.log('[YAPPY] [1/2] ✓ Token obtenido, epochTime:', epochTime);
+
+      // ─── PASO 2: Crear orden (interno, inmediatamente) ───
+      console.log('[YAPPY] [2/2] Creando orden...');
+
+      const paymentBody = {
         merchantId: COMMERCE_ID,
         orderId: orderId,
         domain: domain,
-        paymentDate: String(paymentDate),
+        paymentDate: String(epochTime),
         aliasYappy: aliasYappy || '',
         ipnUrl: ipnUrl,
         discount: discount || '0.00',
@@ -200,49 +154,64 @@ router.post('/', async (req, res) => {
       };
 
       if (SECRET_KEY) {
-        requestBody.secretKey = SECRET_KEY;
-        console.log('[YAPPY] secretKey agregado al body');
+        paymentBody.secretKey = SECRET_KEY;
       }
 
       const authHeader = `Bearer ${yappyToken}`;
-      const yappyHeaders = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'Authorization': authHeader,
-      };
 
-      // ─── Intentar con PROD primero ───
-      console.log('[YAPPY] Intentando PROD: /payments/payment-wc');
-      let result = await callYappy(
-        '/payments/payment-wc',
-        yappyHeaders,
-        requestBody,
-        YAPPY_API_PROD
-      );
+      console.log('[YAPPY] [2/2] Authorization:', authHeader.slice(0, 60) + '...');
+      console.log('[YAPPY] [2/2] Body:', JSON.stringify(paymentBody));
 
-      // Si falla con 401/403, intentar con UAT
-      if (result.status === 401 || result.status === 403) {
-        console.log('[YAPPY] PROD falló con ' + result.status + '. Intentando UAT...');
-        result = await callYappy(
-          '/payments/payment-wc',
-          yappyHeaders,
-          requestBody,
-          YAPPY_API_UAT
-        );
+      const paymentRes = await fetch(`${YAPPY_API_BASE}/payments/payment-wc`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': authHeader,
+        },
+        body: JSON.stringify(paymentBody),
+      });
+
+      const paymentText = await paymentRes.text();
+      console.log('[YAPPY] [2/2] HTTP Status:', paymentRes.status);
+      console.log('[YAPPY] [2/2] Respuesta:', paymentText);
+
+      let paymentData;
+      try {
+        paymentData = JSON.parse(paymentText);
+      } catch (e) {
+        paymentData = { raw: paymentText };
       }
 
-      // Si sigue fallando, intentar endpoint alternativo /payments/payment
-      if (result.status === 401 || result.status === 403) {
-        console.log('[YAPPY] Intentando endpoint alternativo: /payments/payment');
-        result = await callYappy(
-          '/payments/payment',
-          yappyHeaders,
-          requestBody,
-          YAPPY_API_PROD
-        );
+      // Si falla con 401/403, intentar con endpoint alternativo
+      if (paymentRes.status === 401 || paymentRes.status === 403) {
+        console.log('[YAPPY] [2/2] ⚠️ ' + paymentRes.status + ' con payment-wc. Intentando /payments/payment...');
+
+        const altRes = await fetch(`${YAPPY_API_BASE}/payments/payment`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Authorization': authHeader,
+          },
+          body: JSON.stringify(paymentBody),
+        });
+
+        const altText = await altRes.text();
+        console.log('[YAPPY] [2/2] HTTP Status (alt):', altRes.status);
+        console.log('[YAPPY] [2/2] Respuesta (alt):', altText);
+
+        if (altRes.status !== 401 && altRes.status !== 403) {
+          try {
+            paymentData = JSON.parse(altText);
+          } catch (e) {
+            paymentData = { raw: altText };
+          }
+          return res.status(altRes.status).json(paymentData);
+        }
       }
 
-      return res.status(result.status).json(result.data);
+      return res.status(paymentRes.status).json(paymentData);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -250,7 +219,7 @@ router.post('/', async (req, res) => {
     // ═══════════════════════════════════════════════════════════
     return res.status(400).json({
       error: 'Invalid action',
-      message: 'Use "validate" or "payment"',
+      message: 'Use "create-order"',
     });
 
   } catch (error) {
