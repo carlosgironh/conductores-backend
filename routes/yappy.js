@@ -1,13 +1,17 @@
 // routes/yappy.js
 // ============================================================
-// API Yappy para Render — v4.0 (fix 401 - secretKey decodificado)
+// API Yappy para Render — v5.0 (prueba endpoint UAT)
 // Endpoint: POST https://conductores-api.onrender.com/api/yappy
 // ============================================================
 
 const express = require('express');
 const router = express.Router();
 
-const YAPPY_API_BASE = 'https://apipagosbg.bgeneral.cloud';
+// ─── Endpoints ───
+const YAPPY_API_PROD = 'https://apipagosbg.bgeneral.cloud';
+const YAPPY_API_UAT = 'https://api-comecom-uat.yappycloud.com';
+const YAPPY_API_BASE = YAPPY_API_PROD; // Cambiar a UAT si es necesario
+
 const COMMERCE_ID = process.env.YAPPY_COMMERCE_ID;
 const SECRET_KEY_B64 = process.env.YAPPY_SECRET_KEY;
 
@@ -30,6 +34,7 @@ console.log('[YAPPY CONFIG] Verificando variables de entorno...');
 console.log('[YAPPY CONFIG] COMMERCE_ID:', COMMERCE_ID ? '✓ Configurado (' + COMMERCE_ID.slice(0, 8) + '...)' : '✗ NO CONFIGURADO');
 console.log('[YAPPY CONFIG] SECRET_KEY (raw):', SECRET_KEY_B64 ? '✓ Configurado (' + SECRET_KEY_B64.slice(0, 8) + '...)' : '✗ NO CONFIGURADO');
 console.log('[YAPPY CONFIG] SECRET_KEY (decoded):', SECRET_KEY ? '✓ Decodificado (' + SECRET_KEY.slice(0, 20) + '...)' : '✗ NO DISPONIBLE');
+console.log('[YAPPY CONFIG] API Base:', YAPPY_API_BASE);
 
 if (!COMMERCE_ID) {
   console.error('[YAPPY CONFIG] ⚠️ ERROR: YAPPY_COMMERCE_ID no está configurado.');
@@ -59,6 +64,29 @@ function extractEpochTime(token) {
   } catch (e) {
     return Math.floor(Date.now() / 1000);
   }
+}
+
+// ─── Helper: hacer request a Yappy con reintentos ───
+async function callYappy(endpoint, headers, body, apiBase = YAPPY_API_BASE) {
+  const url = `${apiBase}${endpoint}`;
+  console.log(`[YAPPY] Calling: ${url}`);
+  console.log('[YAPPY] Headers:', JSON.stringify(headers));
+  console.log('[YAPPY] Body:', JSON.stringify(body));
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
+  console.log(`[YAPPY] Status: ${res.status}`);
+  console.log(`[YAPPY] Response: ${text}`);
+
+  let data;
+  try { data = JSON.parse(text); } catch (e) { data = { raw: text }; }
+
+  return { status: res.status, data };
 }
 
 // ─── POST /api/yappy ───
@@ -92,35 +120,41 @@ router.post('/', async (req, res) => {
         urlDomain: urlDomain,
       };
 
-      console.log('[YAPPY] Request body:', JSON.stringify(requestBody));
+      // Intentar con PROD primero
+      let result = await callYappy(
+        '/payments/validate/merchant',
+        { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        requestBody,
+        YAPPY_API_PROD
+      );
 
-      const yappyRes = await fetch(`${YAPPY_API_BASE}/payments/validate/merchant`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        body: JSON.stringify(requestBody),
-      });
+      // Si falla, intentar con UAT
+      if (result.status !== 200 || result.data.status?.code !== '0000') {
+        console.log('[YAPPY] PROD falló. Intentando UAT...');
+        result = await callYappy(
+          '/payments/validate/merchant',
+          { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          requestBody,
+          YAPPY_API_UAT
+        );
+      }
 
-      const yappyData = await yappyRes.json();
-      console.log('[YAPPY] Respuesta validate:', JSON.stringify(yappyData));
-
-      if (yappyData.status?.code !== '0000') {
-        console.error('[YAPPY] Yappy rechazó validación:', yappyData.status);
+      if (result.status !== 200 || result.data.status?.code !== '0000') {
+        console.error('[YAPPY] Yappy rechazó validación:', result.data.status || result.data);
         return res.status(400).json({
           error: 'Yappy validation failed',
-          details: yappyData.status,
-          raw: yappyData,
+          details: result.data.status || result.data,
+          raw: result.data,
         });
       }
 
-      const epochTime = extractEpochTime(yappyData.body?.token);
+      const epochTime = extractEpochTime(result.data.body?.token);
 
       return res.json({
-        status: yappyData.status,
-        body: yappyData.body,
+        status: result.data.status,
+        body: result.data.body,
         epochTime: epochTime,
+        apiUsed: result.status === 200 ? 'PROD' : 'UAT',
       });
     }
 
@@ -152,7 +186,6 @@ router.post('/', async (req, res) => {
         return res.status(400).json({ error: 'yappyToken es requerido' });
       }
 
-      // ─── Body del request a Yappy ───
       const requestBody = {
         merchantId: COMMERCE_ID,
         orderId: orderId,
@@ -166,80 +199,50 @@ router.post('/', async (req, res) => {
         total: total,
       };
 
-      // Agregar secretKey decodificado al body si existe
       if (SECRET_KEY) {
         requestBody.secretKey = SECRET_KEY;
-        console.log('[YAPPY] secretKey (decodificado) agregado al body');
+        console.log('[YAPPY] secretKey agregado al body');
       }
 
       const authHeader = `Bearer ${yappyToken}`;
-      console.log('[YAPPY] Authorization header:', authHeader.slice(0, 60) + '...');
-      console.log('[YAPPY] Request body:', JSON.stringify(requestBody));
-
-      // ─── Headers para Yappy ───
       const yappyHeaders = {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
         'Authorization': authHeader,
       };
 
-      console.log('[YAPPY] Headers:', JSON.stringify(yappyHeaders));
+      // ─── Intentar con PROD primero ───
+      console.log('[YAPPY] Intentando PROD: /payments/payment-wc');
+      let result = await callYappy(
+        '/payments/payment-wc',
+        yappyHeaders,
+        requestBody,
+        YAPPY_API_PROD
+      );
 
-      // ─── Intentar con /payments/payment-wc ───
-      console.log('[YAPPY] Intentando endpoint: /payments/payment-wc');
-      let yappyRes = await fetch(`${YAPPY_API_BASE}/payments/payment-wc`, {
-        method: 'POST',
-        headers: yappyHeaders,
-        body: JSON.stringify(requestBody),
-      });
-
-      let responseText = await yappyRes.text();
-      console.log('[YAPPY] HTTP Status (payment-wc):', yappyRes.status);
-      console.log('[YAPPY] Respuesta (payment-wc):', responseText);
-
-      // Si falla con 401/403, intentar con /payments/payment
-      if (yappyRes.status === 401 || yappyRes.status === 403) {
-        console.log('[YAPPY] ⚠️ ' + yappyRes.status + ' con payment-wc. Intentando /payments/payment...');
-
-        yappyRes = await fetch(`${YAPPY_API_BASE}/payments/payment`, {
-          method: 'POST',
-          headers: yappyHeaders,
-          body: JSON.stringify(requestBody),
-        });
-
-        responseText = await yappyRes.text();
-        console.log('[YAPPY] HTTP Status (payment):', yappyRes.status);
-        console.log('[YAPPY] Respuesta (payment):', responseText);
+      // Si falla con 401/403, intentar con UAT
+      if (result.status === 401 || result.status === 403) {
+        console.log('[YAPPY] PROD falló con ' + result.status + '. Intentando UAT...');
+        result = await callYappy(
+          '/payments/payment-wc',
+          yappyHeaders,
+          requestBody,
+          YAPPY_API_UAT
+        );
       }
 
-      // Si sigue fallando, intentar SIN Authorization header (solo secretKey en body)
-      if ((yappyRes.status === 401 || yappyRes.status === 403) && SECRET_KEY) {
-        console.log('[YAPPY] ⚠️ Siguiente ' + yappyRes.status + '. Intentando sin Authorization header...');
-
-        const bodyWithoutAuth = { ...requestBody };
-
-        yappyRes = await fetch(`${YAPPY_API_BASE}/payments/payment-wc`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-          },
-          body: JSON.stringify(bodyWithoutAuth),
-        });
-
-        responseText = await yappyRes.text();
-        console.log('[YAPPY] HTTP Status (sin auth):', yappyRes.status);
-        console.log('[YAPPY] Respuesta (sin auth):', responseText);
+      // Si sigue fallando, intentar endpoint alternativo /payments/payment
+      if (result.status === 401 || result.status === 403) {
+        console.log('[YAPPY] Intentando endpoint alternativo: /payments/payment');
+        result = await callYappy(
+          '/payments/payment',
+          yappyHeaders,
+          requestBody,
+          YAPPY_API_PROD
+        );
       }
 
-      let yappyData;
-      try {
-        yappyData = JSON.parse(responseText);
-      } catch (e) {
-        yappyData = { raw: responseText };
-      }
-
-      return res.status(yappyRes.status).json(yappyData);
+      return res.status(result.status).json(result.data);
     }
 
     // ═══════════════════════════════════════════════════════════
