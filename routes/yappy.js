@@ -11,6 +11,15 @@ const YAPPY_API_BASE = 'https://apipagosbg.bgeneral.cloud';
 const COMMERCE_ID = process.env.YAPPY_COMMERCE_ID;
 const SECRET_KEY = process.env.YAPPY_SECRET_KEY;
 
+// ─── Verificar variables de entorno al iniciar ───
+console.log('[YAPPY CONFIG] Verificando variables de entorno...');
+console.log('[YAPPY CONFIG] COMMERCE_ID:', COMMERCE_ID ? '✓ Configurado (' + COMMERCE_ID.slice(0, 8) + '...)' : '✗ NO CONFIGURADO');
+console.log('[YAPPY CONFIG] SECRET_KEY:', SECRET_KEY ? '✓ Configurado' : '✗ NO CONFIGURADO');
+
+if (!COMMERCE_ID) {
+  console.error('[YAPPY CONFIG] ⚠️ ERROR: YAPPY_COMMERCE_ID no está configurado. Las llamadas a Yappy fallarán.');
+}
+
 // ─── CORS Middleware ───
 router.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -40,6 +49,15 @@ router.post('/', async (req, res) => {
 
   console.log(`[YAPPY API] Action: ${action} | Time: ${new Date().toISOString()}`);
 
+  // Validar que COMMERCE_ID esté configurado
+  if (!COMMERCE_ID) {
+    console.error('[YAPPY API] ERROR: YAPPY_COMMERCE_ID no está configurado');
+    return res.status(500).json({
+      error: 'Server configuration error',
+      message: 'YAPPY_COMMERCE_ID no está configurado. Ve a Render Dashboard → Environment Variables.',
+    });
+  }
+
   try {
     // ═══════════════════════════════════════════════════════════
     // PASO 1: Validar comercio
@@ -51,25 +69,31 @@ router.post('/', async (req, res) => {
       console.log('[YAPPY] merchantId:', COMMERCE_ID);
       console.log('[YAPPY] urlDomain:', urlDomain);
 
+      const requestBody = {
+        merchantId: COMMERCE_ID,
+        urlDomain: urlDomain,
+      };
+
+      console.log('[YAPPY] Request body:', JSON.stringify(requestBody));
+
       const yappyRes = await fetch(`${YAPPY_API_BASE}/payments/validate/merchant`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
         },
-        body: JSON.stringify({
-          merchantId: COMMERCE_ID,
-          urlDomain: urlDomain,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       const yappyData = await yappyRes.json();
       console.log('[YAPPY] Respuesta validate:', JSON.stringify(yappyData));
 
       if (yappyData.status?.code !== '0000') {
+        console.error('[YAPPY] Yappy rechazó validación:', yappyData.status);
         return res.status(400).json({
           error: 'Yappy validation failed',
           details: yappyData.status,
+          raw: yappyData,
         });
       }
 
@@ -103,30 +127,50 @@ router.post('/', async (req, res) => {
       console.log('[YAPPY] orderId:', orderId);
       console.log('[YAPPY] paymentDate:', paymentDate);
       console.log('[YAPPY] total:', total);
+      console.log('[YAPPY] yappyToken (primeros 50 chars):', yappyToken ? yappyToken.slice(0, 50) + '...' : 'VACÍO');
+
+      if (!yappyToken) {
+        console.error('[YAPPY] ERROR: yappyToken está vacío');
+        return res.status(400).json({ error: 'yappyToken es requerido' });
+      }
+
+      const requestBody = {
+        merchantId: COMMERCE_ID,
+        orderId: orderId,
+        domain: domain,
+        paymentDate: String(paymentDate),
+        aliasYappy: aliasYappy || '',
+        ipnUrl: ipnUrl,
+        discount: discount || '0.00',
+        taxes: taxes || '0.00',
+        subtotal: subtotal,
+        total: total,
+      };
+
+      const authHeader = `Bearer ${yappyToken}`;
+      console.log('[YAPPY] Authorization header:', authHeader.slice(0, 60) + '...');
+      console.log('[YAPPY] Request body:', JSON.stringify(requestBody));
 
       const yappyRes = await fetch(`${YAPPY_API_BASE}/payments/payment-wc`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
-          'Authorization': `Bearer ${yappyToken}`,
+          'Authorization': authHeader,
         },
-        body: JSON.stringify({
-          merchantId: COMMERCE_ID,
-          orderId: orderId,
-          domain: domain,
-          paymentDate: String(paymentDate),
-          aliasYappy: aliasYappy || '',
-          ipnUrl: ipnUrl,
-          discount: discount || '0.00',
-          taxes: taxes || '0.00',
-          subtotal: subtotal,
-          total: total,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
-      const yappyData = await yappyRes.json();
-      console.log('[YAPPY] Respuesta payment:', JSON.stringify(yappyData));
+      const responseText = await yappyRes.text();
+      console.log('[YAPPY] HTTP Status:', yappyRes.status);
+      console.log('[YAPPY] Respuesta raw:', responseText);
+
+      let yappyData;
+      try {
+        yappyData = JSON.parse(responseText);
+      } catch (e) {
+        yappyData = { raw: responseText };
+      }
 
       return res.status(yappyRes.status).json(yappyData);
     }
