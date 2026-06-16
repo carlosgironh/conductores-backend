@@ -10,7 +10,12 @@ app.use(express.json());
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'OK', service: 'Conductores API', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'OK', 
+    service: 'Conductores API',
+    version: '3.0 - Yappy Comercial API',
+    timestamp: new Date().toISOString() 
+  });
 });
 
 // Yappy routes
