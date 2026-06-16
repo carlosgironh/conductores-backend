@@ -13,7 +13,7 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'OK', 
     service: 'Conductores API',
-    version: '3.0 - Yappy Comercial API',
+    version: '2.1 - Yappy API Original (corregido)',
     timestamp: new Date().toISOString() 
   });
 });

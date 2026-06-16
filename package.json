@@ -1,7 +1,7 @@
 {
   "name": "conductores-api",
-  "version": "3.0.0",
-  "description": "API para conductores con integración Yappy Comercial v3",
+  "version": "2.1.0",
+  "description": "API para conductores con integración Yappy (corregido según Yappy Comercial)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
