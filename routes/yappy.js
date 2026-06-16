@@ -12,7 +12,7 @@ const YAPPY_MERCHANT_ID = process.env.YAPPY_MERCHANT_ID || '9aaf1605-ec6d-4ace-a
 const YAPPY_SECRET_KEY = process.env.YAPPY_SECRET_KEY || '';
 const YAPPY_BASE_URL = 'https://apipagosbg.bgeneral.cloud';
 const YAPPY_DOMAIN = 'https://nrdesingcorp.com';
-const YAPPY_ALIAS = process.env.YAPPY_ALIAS || '66000000';  // Teléfono de prueba o real
+const YAPPY_ALIAS = process.env.YAPPY_ALIAS || '69977978';  // Teléfono de prueba o real
 
 // ============================================================
 // GET /api/yappy - Info y diagnóstico
