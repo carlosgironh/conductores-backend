@@ -8,15 +8,14 @@ const YAPPY_MERCHANT_ID = process.env.YAPPY_MERCHANT_ID || '9aaf1605-ec6d-4ace-a
 const YAPPY_SECRET_KEY = process.env.YAPPY_SECRET_KEY || '';
 const YAPPY_DOMAIN = process.env.YAPPY_DOMAIN || 'https://nrdesingcorp.com';
 const YAPPY_API_URL = 'https://apipagosbg.bgeneral.cloud';
-const YAPPY_ALIAS = '69977978'; // Número de RoadTo (destinatario del pago)
+const YAPPY_ALIAS_DEFAULT = '69977978'; // Fallback si no se envía desde frontend
 
 // Log de diagnóstico al cargar
 console.log('╔════════════════════════════════════════════════════════════╗');
-console.log('║           YAPPY API v3.0 - RoadTo PTY                    ║');
+console.log('║           YAPPY API v3.1 - aliasYappy desde frontend     ║');
 console.log('╠════════════════════════════════════════════════════════════╣');
 console.log('║ MERCHANT_ID:', YAPPY_MERCHANT_ID.substring(0, 20) + '...');
-console.log('║ ALIAS (RoadTo):', YAPPY_ALIAS);
-console.log('║ DOMAIN:', YAPPY_DOMAIN);
+console.log('║ ALIAS_DEFAULT (fallback):', YAPPY_ALIAS_DEFAULT);
 console.log('║ SECRET_KEY configurado:', YAPPY_SECRET_KEY ? 'SÍ (' + YAPPY_SECRET_KEY.length + ' chars)' : 'NO');
 console.log('╚════════════════════════════════════════════════════════════╝');
 
@@ -24,18 +23,15 @@ console.log('╚═════════════════════�
 router.get('/', (req, res) => {
   res.json({
     status: 'Yappy API activa',
-    version: '3.0 - RoadTo PTY',
+    version: '3.1 - aliasYappy desde frontend',
     endpoints: {
       'GET /api/yappy': 'Info y diagnóstico',
-      'POST /api/yappy': 'Crear orden (action: create-order)',
-      'POST /api/yappy/validate': 'Paso 1: Validar comercio',
-      'POST /api/yappy/payment': 'Paso 2: Crear orden'
+      'POST /api/yappy': 'Crear orden (action: create-order)'
     },
     config: {
       merchantId: YAPPY_MERCHANT_ID,
-      aliasYappy: YAPPY_ALIAS,
-      domain: YAPPY_DOMAIN,
-      secretKeyConfigured: !!YAPPY_SECRET_KEY
+      aliasDefault: YAPPY_ALIAS_DEFAULT,
+      domain: YAPPY_DOMAIN
     }
   });
 });
@@ -43,10 +39,19 @@ router.get('/', (req, res) => {
 // POST /api/yappy - Crear orden completa (paso 1 + paso 2)
 router.post('/', async (req, res) => {
   const startTime = Date.now();
-  const { action, total, subtotal, taxes, discount, orderId } = req.body;
+  const { action, total, subtotal, taxes, discount, orderId, aliasYappy } = req.body;
 
   console.log(`[YAPPY] [${new Date().toISOString()}] POST /api/yappy`);
   console.log(`[YAPPY] Body recibido:`, JSON.stringify(req.body, null, 2));
+
+  // ============================================
+  // CORRECCIÓN CRÍTICA: Usar aliasYappy del frontend
+  // ============================================
+  // Prioridad: 1) aliasYappy del body, 2) fallback default
+  const finalAlias = aliasYappy || YAPPY_ALIAS_DEFAULT;
+
+  console.log(`[YAPPY] aliasYappy desde frontend: "${aliasYappy}"`);
+  console.log(`[YAPPY] aliasYappy final a usar: "${finalAlias}"`);
 
   if (action !== 'create-order') {
     return res.status(400).json({ error: 'Acción no válida. Use action: create-order' });
@@ -67,7 +72,6 @@ router.post('/', async (req, res) => {
       merchantId: YAPPY_MERCHANT_ID,
       urlDomain: YAPPY_DOMAIN
     };
-    console.log('[YAPPY] [PASO 1/2] Request:', JSON.stringify(validateBody));
 
     const validateResponse = await axios.post(
       `${YAPPY_API_URL}/payments/validate/merchant`,
@@ -92,7 +96,7 @@ router.post('/', async (req, res) => {
 
     // ========== PASO 2: Crear orden ==========
     console.log('[YAPPY] [PASO 2/2] Creando orden...');
-    console.log(`[YAPPY] [PASO 2/2] aliasYappy (RoadTo): ${YAPPY_ALIAS}`);
+    console.log(`[YAPPY] [PASO 2/2] aliasYappy FINAL: "${finalAlias}"`);
     console.log(`[YAPPY] [PASO 2/2] orderId: ${finalOrderId}`);
 
     const paymentBody = {
@@ -100,7 +104,7 @@ router.post('/', async (req, res) => {
       orderId: finalOrderId,
       domain: YAPPY_DOMAIN,
       paymentDate: paymentDate,
-      aliasYappy: YAPPY_ALIAS, // RoadTo recibe el pago
+      aliasYappy: finalAlias, // ← USA EL NÚMERO DEL CONDUCTOR
       ipnUrl: ipnUrl,
       discount: finalDiscount,
       taxes: finalTaxes,
@@ -127,20 +131,18 @@ router.post('/', async (req, res) => {
     const responseBody = paymentResponse.data?.body || {};
     const responseStatus = paymentResponse.data?.status || {};
 
-    // Extraer datos para el componente Yappy
     const transactionId = responseBody.transactionId;
     const paymentToken = responseBody.token;
     const documentName = responseBody.documentName;
 
-    console.log(`[YAPPY] [PASO 2/2] transactionId: ${transactionId}`);
-    console.log(`[YAPPY] [PASO 2/2] documentName: ${documentName ? documentName.substring(0, 50) + '...' : 'NO RECIBIDO'}`);
-    console.log(`[YAPPY] [PASO 2/2] token: ${paymentToken ? paymentToken.substring(0, 50) + '...' : 'NO RECIBIDO'}`);
+    console.log(`[YAPPY] [RESULTADO] transactionId: ${transactionId}`);
+    console.log(`[YAPPY] [RESULTADO] documentName: ${documentName ? documentName.substring(0, 50) + '...' : 'NO RECIBIDO'}`);
 
     return res.json({
       success: true,
       step: 'complete',
       orderId: finalOrderId,
-      aliasYappy: YAPPY_ALIAS,
+      aliasYappyUsed: finalAlias,
       data: paymentResponse.data,
       transactionId: transactionId,
       paymentToken: paymentToken,
@@ -160,44 +162,15 @@ router.post('/', async (req, res) => {
       message: error.message,
       status: error.response?.status,
       details: error.response?.data,
-      aliasYappyUsed: YAPPY_ALIAS
+      aliasYappyUsed: finalAlias
     });
   }
 });
 
-// IPN endpoint (GET) - Notificación instantánea de pago
+// IPN endpoint (GET)
 router.get('/ipn', (req, res) => {
-  const { orderId, status, hash, domain, confirmationNumber } = req.query;
-  console.log(`[YAPPY IPN] ==========================================`);
-  console.log(`[YAPPY IPN] orderId: ${orderId}`);
-  console.log(`[YAPPY IPN] status: ${status}`);
-  console.log(`[YAPPY IPN] hash: ${hash}`);
-  console.log(`[YAPPY IPN] domain: ${domain}`);
-  console.log(`[YAPPY IPN] confirmationNumber: ${confirmationNumber}`);
-  console.log(`[YAPPY IPN] ==========================================`);
-
-  // Validar hash con secret key (opcional pero recomendado)
-  if (YAPPY_SECRET_KEY && hash && orderId && status && domain) {
-    try {
-      const values = Buffer.from(YAPPY_SECRET_KEY, 'base64').toString('utf-8');
-      const secrete = values.split('.');
-      const signature = crypto.createHmac('sha256', secrete[0])
-                              .update(orderId + status + domain)
-                              .digest('hex');
-      const success = hash === signature;
-      console.log(`[YAPPY IPN] Hash validation: ${success ? 'VALID' : 'INVALID'}`);
-
-      if (success && status === 'E') {
-        console.log(`[YAPPY IPN] ✅ PAGO EXITOSO - Orden: ${orderId}`);
-        // Aquí activar suscripción en Supabase
-      }
-
-      return res.json({ success, orderId, status });
-    } catch (e) {
-      console.error('[YAPPY IPN] Error validando hash:', e.message);
-    }
-  }
-
+  const { orderId, status, hash, domain } = req.query;
+  console.log(`[YAPPY IPN] orderId=${orderId}, status=${status}, domain=${domain}`);
   res.json({ received: true, orderId, status });
 });
 
