@@ -6,13 +6,28 @@ const router = express.Router();
 // CONFIGURACIÓN - API Original Yappy (apipagosbg.bgeneral.cloud)
 // CORRECCIONES según Yappy Comercial:
 // 1. Authorization: token SIN "Bearer " prefix
-// 2. aliasYappy incluido en el body
+// 2. aliasYappy = NÚMERO DE TELÉFONO (sin prefijo, sin guiones)
 // ============================================================
 const YAPPY_MERCHANT_ID = process.env.YAPPY_MERCHANT_ID || '9aaf1605-ec6d-4ace-a610-86897b898cc2';
 const YAPPY_SECRET_KEY = process.env.YAPPY_SECRET_KEY || '';
 const YAPPY_BASE_URL = 'https://apipagosbg.bgeneral.cloud';
 const YAPPY_DOMAIN = 'https://nrdesingcorp.com';
-const YAPPY_ALIAS = process.env.YAPPY_ALIAS || 'roadto18';  // Alias de cuenta Yappy
+// IMPORTANTE: aliasYappy debe ser NÚMERO DE TELÉFONO válido en Yappy
+const YAPPY_ALIAS = process.env.YAPPY_ALIAS || '69977978';
+
+// LOGS DE DIAGNÓSTICO AL INICIAR
+console.log('');
+console.log('╔════════════════════════════════════════════════════════════╗');
+console.log('║           YAPPY API v2.5 - DIAGNÓSTICO DE INICIO           ║');
+console.log('╠════════════════════════════════════════════════════════════╣');
+console.log('║ MERCHANT_ID:', YAPPY_MERCHANT_ID.substring(0, 12) + '...');
+console.log('║ ALIAS (env):', process.env.YAPPY_ALIAS || '(no configurado)');
+console.log('║ ALIAS (final):', YAPPY_ALIAS);
+console.log('║ ALIAS length:', YAPPY_ALIAS.length);
+console.log('║ ALIAS es número:', /^\d+$/.test(YAPPY_ALIAS) ? 'SÍ' : 'NO');
+console.log('║ SECRET_KEY:', YAPPY_SECRET_KEY ? 'Configurada' : 'NO configurada');
+console.log('╚════════════════════════════════════════════════════════════╝');
+console.log('');
 
 // ============================================================
 // GET /api/yappy - Info y diagnóstico
@@ -20,12 +35,11 @@ const YAPPY_ALIAS = process.env.YAPPY_ALIAS || 'roadto18';  // Alias de cuenta Y
 router.get('/', (req, res) => {
   res.json({
     status: 'Yappy API activa',
-    version: '2.2 - Funcionando!',
+    version: '2.5 - Fix aliasYappy hardcodeado',
     notes: [
-      '✅ Corrección 1: Authorization SIN "Bearer" prefix',
-      '✅ Corrección 2: aliasYappy incluido en body',
-      '✅ Paso 1 (validate): 200 OK - Código 0000',
-      '✅ Paso 2 (payment): 200 OK - Código 0000'
+      '✅ Authorization SIN "Bearer" prefix',
+      '✅ aliasYappy = NÚMERO DE TELÉFONO (sin prefijo, sin guiones)',
+      '⚠️ Verificar que YAPPY_ALIAS esté configurado en Render'
     ],
     endpoints: {
       'GET /api/yappy': 'Info y diagnóstico',
@@ -37,6 +51,8 @@ router.get('/', (req, res) => {
       merchantId: YAPPY_MERCHANT_ID ? YAPPY_MERCHANT_ID.substring(0, 8) + '...' : 'NO CONFIGURADO',
       secretKeyConfigured: !!YAPPY_SECRET_KEY,
       aliasYappy: YAPPY_ALIAS,
+      aliasYappyLength: YAPPY_ALIAS.length,
+      aliasIsNumber: /^\d+$/.test(YAPPY_ALIAS),
       domain: YAPPY_DOMAIN,
       baseUrl: YAPPY_BASE_URL
     },
@@ -107,7 +123,7 @@ async function validateMerchant(req, res) {
 
 // ============================================================
 // PASO 2: Crear orden
-// CORRECCIÓN: Authorization sin "Bearer", aliasYappy incluido
+// CORRECCIÓN: aliasYappy = NÚMERO DE TELÉFONO
 // ============================================================
 async function createPayment(req, res) {
   try {
@@ -117,7 +133,7 @@ async function createPayment(req, res) {
       orderId: customOrderId,
       total = '5.00',
       subtotal = '5.00',
-      aliasYappy = YAPPY_ALIAS,
+      aliasYappy,
       ipnUrl = `${YAPPY_DOMAIN}/yappy-ipn`
     } = req.body;
 
@@ -128,16 +144,19 @@ async function createPayment(req, res) {
     const orderId = customOrderId || 'ORD' + Math.random().toString(36).substring(2, 11).toUpperCase();
     const paymentDate = epochTime ? String(epochTime) : String(Math.floor(Date.now() / 1000));
 
-    console.log('[YAPPY] [PASO 2] Creando orden...');
-    console.log('[YAPPY] [PASO 2] orderId:', orderId);
-    console.log('[YAPPY] [PASO 2] aliasYappy:', aliasYappy);
+    // USAR ALIAS: request > env > default
+    const finalAlias = aliasYappy || YAPPY_ALIAS || '69977978';
+
+    console.log('[YAPPY] [PASO 2] aliasYappy desde request:', aliasYappy);
+    console.log('[YAPPY] [PASO 2] aliasYappy desde env:', YAPPY_ALIAS);
+    console.log('[YAPPY] [PASO 2] aliasYappy final:', finalAlias);
 
     const body = {
       merchantId: YAPPY_MERCHANT_ID,
       orderId: orderId,
       domain: YAPPY_DOMAIN,
       paymentDate: paymentDate,
-      aliasYappy: aliasYappy,
+      aliasYappy: finalAlias,
       ipnUrl: ipnUrl,
       discount: '0.00',
       taxes: '0.00',
@@ -145,14 +164,13 @@ async function createPayment(req, res) {
       total: total
     };
 
-    console.log('[YAPPY] [PASO 2] Body:', JSON.stringify(body));
-    console.log('[YAPPY] [PASO 2] Authorization (sin Bearer):', token.substring(0, 50) + '...');
+    console.log('[YAPPY] [PASO 2] Body completo:', JSON.stringify(body));
 
     const response = await axios.post(`${YAPPY_BASE_URL}/payments/payment-wc`, body, {
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
-        'Authorization': token  // SIN "Bearer "
+        'Authorization': token
       },
       timeout: 15000
     });
@@ -175,9 +193,11 @@ async function createPayment(req, res) {
 // ============================================================
 async function createOrder(req, res) {
   try {
-    const { total = '5.00', subtotal = '5.00', aliasYappy = YAPPY_ALIAS } = req.body;
+    const { total = '5.00', subtotal = '5.00', aliasYappy } = req.body;
 
-    console.log('[YAPPY] === FLUJO COMPLETO (v2.2 - Funcionando!) ===');
+    console.log('[YAPPY] === FLUJO COMPLETO (v2.5) ===');
+    console.log('[YAPPY] aliasYappy desde request body:', aliasYappy);
+    console.log('[YAPPY] YAPPY_ALIAS desde env:', YAPPY_ALIAS);
 
     // PASO 1: Validar comercio
     console.log('[YAPPY] [PASO 1] Validando comercio...');
@@ -204,16 +224,16 @@ async function createOrder(req, res) {
     const orderId = 'ORD' + Math.random().toString(36).substring(2, 11).toUpperCase();
     const paymentDate = String(epochTime || Math.floor(Date.now() / 1000));
 
-    console.log('[YAPPY] [PASO 2] Creando orden...');
-    console.log('[YAPPY] [PASO 2] orderId:', orderId);
-    console.log('[YAPPY] [PASO 2] aliasYappy:', aliasYappy);
+    // USAR ALIAS: request > env > default
+    const finalAlias = aliasYappy || YAPPY_ALIAS || '69977978';
+    console.log('[YAPPY] [PASO 2] aliasYappy final usado:', finalAlias);
 
     const body = {
       merchantId: YAPPY_MERCHANT_ID,
       orderId: orderId,
       domain: YAPPY_DOMAIN,
       paymentDate: paymentDate,
-      aliasYappy: aliasYappy,
+      aliasYappy: finalAlias,
       ipnUrl: `${YAPPY_DOMAIN}/yappy-ipn`,
       discount: '0.00',
       taxes: '0.00',
@@ -227,14 +247,13 @@ async function createOrder(req, res) {
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
-        'Authorization': step1Token  // SIN "Bearer "
+        'Authorization': step1Token
       },
       timeout: 15000
     });
 
     console.log('[YAPPY] [PASO 2] ✓ Respuesta:', JSON.stringify(paymentRes.data));
 
-    // Extraer datos de la respuesta
     const responseBody = paymentRes.data?.body;
     const transactionId = responseBody?.transactionId;
     const paymentToken = responseBody?.token;
@@ -257,6 +276,20 @@ async function createOrder(req, res) {
     console.error('[YAPPY] ERROR:', error.message);
     const status = error.response?.status;
     const details = error.response?.data;
+
+    if (details?.status?.code === 'YAPPY-004') {
+      return res.status(400).json({
+        error: 'Yappy payment failed - YAPPY-004',
+        message: 'Error en el request o algun campo puede estar vacio.',
+        details: details,
+        currentAlias: YAPPY_ALIAS,
+        suggestions: [
+          'Verificar que YAPPY_ALIAS esté configurado en Render Dashboard',
+          'Verificar que aliasYappy sea un número de teléfono válido en Yappy',
+          'Verificar que todos los campos del body estén presentes'
+        ]
+      });
+    }
 
     return res.status(status || 500).json({
       error: 'Yappy payment failed',
