@@ -74,10 +74,10 @@ router.post('/', async (req, res) => {
   }
 
   const finalOrderId = orderId || 'ORD' + crypto.randomBytes(4).toString('hex').toUpperCase();
-  const finalSubtotal = subtotal || total || '5.00';
+  const finalSubtotal = subtotal || total || '0.01';
   const finalTaxes = taxes || '0.00';
   const finalDiscount = discount || '0.00';
-  const finalTotal = total || '5.00';
+  const finalTotal = total || '0.01';
   const paymentDate = Math.floor(Date.now() / 1000).toString();
   const ipnUrl = `${YAPPY_DOMAIN}/api/yappy/ipn`;
 
