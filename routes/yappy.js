@@ -1,7 +1,6 @@
 const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
-const { createClient } = require('@supabase/supabase-js');
 
 const router = express.Router();
 
@@ -14,17 +13,21 @@ const YAPPY_DOMAIN = process.env.YAPPY_DOMAIN || 'https://nrdesingcorp.com';
 const YAPPY_API_URL = 'https://apipagosbg.bgeneral.cloud';
 const YAPPY_ALIAS_DEFAULT = '69977978';
 
-// Supabase para activar suscripción desde IPN
+// Supabase REST API (usando axios, no necesita @supabase/supabase-js)
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://ugchmuhjzzyofoogprlr.supabase.co';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
-let supabase = null;
-if (SUPABASE_SERVICE_KEY) {
-  supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-}
+
+// Headers para Supabase REST API
+const supabaseHeaders = {
+  'apikey': SUPABASE_SERVICE_KEY,
+  'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+  'Content-Type': 'application/json',
+  'Prefer': 'return=representation'
+};
 
 // Log de diagnóstico al cargar
 console.log('╔════════════════════════════════════════════════════════════╗');
-console.log('║           YAPPY API v3.3 - IPN + Tabla Pagos             ║');
+console.log('║           YAPPY API v3.4 - IPN + Supabase REST             ║');
 console.log('╠════════════════════════════════════════════════════════════╣');
 console.log('║ MERCHANT_ID:', YAPPY_MERCHANT_ID.substring(0, 20) + '...');
 console.log('║ ALIAS_DEFAULT:', YAPPY_ALIAS_DEFAULT);
@@ -33,12 +36,62 @@ console.log('║ SUPABASE_SERVICE_KEY:', SUPABASE_SERVICE_KEY ? 'SÍ (' + SUPABA
 console.log('╚════════════════════════════════════════════════════════════╝');
 
 // ============================================================
+// HELPERS - Supabase REST API
+// ============================================================
+async function supabaseInsert(table, data) {
+  if (!SUPABASE_SERVICE_KEY) return { error: 'No SUPABASE_SERVICE_KEY' };
+  try {
+    const response = await axios.post(
+      `${SUPABASE_URL}/rest/v1/${table}`,
+      data,
+      { headers: supabaseHeaders }
+    );
+    return { data: response.data, error: null };
+  } catch (error) {
+    return { data: null, error: error.response?.data || error.message };
+  }
+}
+
+async function supabaseUpdate(table, match, data) {
+  if (!SUPABASE_SERVICE_KEY) return { error: 'No SUPABASE_SERVICE_KEY' };
+  try {
+    const matchParams = Object.entries(match)
+      .map(([k, v]) => `${k}=eq.${encodeURIComponent(v)}`)
+      .join('&');
+    const response = await axios.patch(
+      `${SUPABASE_URL}/rest/v1/${table}?${matchParams}`,
+      data,
+      { headers: supabaseHeaders }
+    );
+    return { data: response.data, error: null };
+  } catch (error) {
+    return { data: null, error: error.response?.data || error.message };
+  }
+}
+
+async function supabaseSelect(table, match, columns = '*') {
+  if (!SUPABASE_SERVICE_KEY) return { data: null, error: 'No SUPABASE_SERVICE_KEY' };
+  try {
+    const matchParams = Object.entries(match)
+      .map(([k, v]) => `${k}=eq.${encodeURIComponent(v)}`)
+      .join('&');
+    const response = await axios.get(
+      `${SUPABASE_URL}/rest/v1/${table}?${matchParams}&select=${columns}`,
+      { headers: supabaseHeaders }
+    );
+    return { data: response.data, error: null };
+  } catch (error) {
+    return { data: null, error: error.response?.data || error.message };
+  }
+}
+
+// ============================================================
 // GET /api/yappy - Info y diagnóstico
 // ============================================================
 router.get('/', (req, res) => {
   res.json({
     status: 'Yappy API activa',
-    version: '3.3 - IPN + Tabla Pagos',
+    version: '3.4 - IPN + Supabase REST API (axios)',
     endpoints: {
       'GET /api/yappy': 'Info y diagnóstico',
       'POST /api/yappy': 'Crear orden (action: create-order)',
@@ -48,7 +101,7 @@ router.get('/', (req, res) => {
       merchantId: YAPPY_MERCHANT_ID,
       aliasDefault: YAPPY_ALIAS_DEFAULT,
       domain: YAPPY_DOMAIN,
-      supabaseConfigured: !!supabase
+      supabaseConfigured: !!SUPABASE_SERVICE_KEY
     }
   });
 });
@@ -139,36 +192,30 @@ router.post('/', async (req, res) => {
     const paymentToken = responseBody.token;
     const documentName = responseBody.documentName;
 
-    // ============================================================
-    // PASO 3: Guardar en tabla pagos
-    // ============================================================
-    if (supabase && conductor_id) {
+    // PASO 3: Guardar en tabla pagos usando Supabase REST API
+    if (SUPABASE_SERVICE_KEY && conductor_id) {
       try {
         console.log(`[YAPPY] [PASO 3/3] Guardando en tabla pagos...`);
 
-        const { data: pagoData, error: pagoError } = await supabase
-          .from('pagos')
-          .insert({
-            conductor_id: conductor_id,
-            auth_user_id: auth_user_id || null,
-            monto: parseFloat(finalTotal),
-            moneda: 'USD',
-            plan: 'basico_24h',
-            estado: 'pendiente',
-            metodo: 'yappy',
-            referencia: finalOrderId,
-            fecha_pago: new Date().toISOString(),
-            fecha_vencimiento: null,
-            yappy_transaction_id: transactionId || null,
-            yappy_document_name: documentName || null
-          })
-          .select()
-          .single();
+        const { data: pagoData, error: pagoError } = await supabaseInsert('pagos', {
+          conductor_id: conductor_id,
+          auth_user_id: auth_user_id || null,
+          monto: parseFloat(finalTotal),
+          moneda: 'USD',
+          plan: 'basico_24h',
+          estado: 'pendiente',
+          metodo: 'yappy',
+          referencia: finalOrderId,
+          fecha_pago: new Date().toISOString(),
+          fecha_vencimiento: null,
+          yappy_transaction_id: transactionId || null,
+          yappy_document_name: documentName || null
+        });
 
         if (pagoError) {
-          console.error('[YAPPY] [PASO 3/3] Error insertando pago:', pagoError.message);
+          console.error('[YAPPY] [PASO 3/3] Error insertando pago:', JSON.stringify(pagoError));
         } else {
-          console.log(`[YAPPY] [PASO 3/3] ✅ Pago guardado. ID: ${pagoData.id}, Referencia: ${finalOrderId}`);
+          console.log(`[YAPPY] [PASO 3/3] ✅ Pago guardado. Referencia: ${finalOrderId}`);
         }
       } catch (e) {
         console.error('[YAPPY] [PASO 3/3] Error:', e.message);
@@ -239,35 +286,32 @@ router.get('/ipn', async (req, res) => {
   if (status === 'E') {
     console.log(`[YAPPY IPN] ✅ PAGO EJECUTADO - Orden: ${orderId}`);
 
-    if (supabase) {
+    if (SUPABASE_SERVICE_KEY) {
       try {
         // 1. Buscar pago por referencia (orderId)
         console.log(`[YAPPY IPN] Buscando pago con referencia: ${orderId}`);
-        const { data: pago, error: findError } = await supabase
-          .from('pagos')
-          .select('id, conductor_id, auth_user_id, monto, estado')
-          .eq('referencia', orderId)
-          .maybeSingle();
+        const { data: pagos, error: findError } = await supabaseSelect('pagos', { referencia: orderId }, 'id,conductor_id,auth_user_id,monto,estado');
 
         if (findError) {
-          console.error('[YAPPY IPN] Error buscando pago:', findError.message);
-        } else if (!pago) {
+          console.error('[YAPPY IPN] Error buscando pago:', JSON.stringify(findError));
+        } else if (!pagos || pagos.length === 0) {
           console.log(`[YAPPY IPN] ⚠️ No se encontró pago con referencia: ${orderId}`);
         } else {
+          const pago = pagos[0];
           console.log(`[YAPPY IPN] Pago encontrado: ID=${pago.id}, conductor_id=${pago.conductor_id}`);
 
           // 2. Actualizar pago a 'pagado'
-          const { error: updatePagoError } = await supabase
-            .from('pagos')
-            .update({
+          const { error: updatePagoError } = await supabaseUpdate('pagos',
+            { id: pago.id },
+            {
               estado: 'pagado',
               yappy_transaction_id: confirmationNumber || null,
               fecha_vencimiento: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-            })
-            .eq('id', pago.id);
+            }
+          );
 
           if (updatePagoError) {
-            console.error('[YAPPY IPN] Error actualizando pago:', updatePagoError.message);
+            console.error('[YAPPY IPN] Error actualizando pago:', JSON.stringify(updatePagoError));
           } else {
             console.log(`[YAPPY IPN] ✅ Pago actualizado a 'pagado'`);
           }
@@ -276,20 +320,20 @@ router.get('/ipn', async (req, res) => {
           const ahora = new Date();
           const expiracion = new Date(ahora.getTime() + 24 * 60 * 60 * 1000);
 
-          const { data: conductor, error: condError } = await supabase
-            .from('conductores')
-            .select('id, nombres, apellidos, auth_user_id')
-            .eq('id', pago.conductor_id)
-            .maybeSingle();
+          const { data: conductores, error: condError } = await supabaseSelect('conductores',
+            { id: pago.conductor_id },
+            'id,nombres,apellidos,auth_user_id'
+          );
 
           if (condError) {
-            console.error('[YAPPY IPN] Error buscando conductor:', condError.message);
-          } else if (conductor) {
+            console.error('[YAPPY IPN] Error buscando conductor:', JSON.stringify(condError));
+          } else if (conductores && conductores.length > 0) {
+            const conductor = conductores[0];
             console.log(`[YAPPY IPN] Conductor: ${conductor.nombres} ${conductor.apellidos}`);
 
-            const { error: updateCondError } = await supabase
-              .from('conductores')
-              .update({
+            const { error: updateCondError } = await supabaseUpdate('conductores',
+              { id: pago.conductor_id },
+              {
                 status: 'active',
                 suscripcion_activa: true,
                 pago_al_dia: true,
@@ -297,11 +341,11 @@ router.get('/ipn', async (req, res) => {
                 proximo_pago: expiracion.toISOString(),
                 fecha_vencimiento: expiracion.toISOString(),
                 payment_status: 'paid'
-              })
-              .eq('id', pago.conductor_id);
+              }
+            );
 
             if (updateCondError) {
-              console.error('[YAPPY IPN] Error activando suscripción:', updateCondError.message);
+              console.error('[YAPPY IPN] Error activando suscripción:', JSON.stringify(updateCondError));
             } else {
               console.log(`[YAPPY IPN] ✅ Suscripción activada para ${conductor.nombres} ${conductor.apellidos}`);
               console.log(`[YAPPY IPN] ✅ Válida hasta: ${expiracion.toISOString()}`);
@@ -331,13 +375,10 @@ router.get('/ipn', async (req, res) => {
 
 // Helper para actualizar estado de pago
 async function actualizarEstadoPago(orderId, estado) {
-  if (!supabase || !orderId) return;
+  if (!SUPABASE_SERVICE_KEY || !orderId) return;
   try {
-    const { error } = await supabase
-      .from('pagos')
-      .update({ estado: estado })
-      .eq('referencia', orderId);
-    if (error) console.error(`[YAPPY IPN] Error actualizando pago a ${estado}:`, error.message);
+    const { error } = await supabaseUpdate('pagos', { referencia: orderId }, { estado: estado });
+    if (error) console.error(`[YAPPY IPN] Error actualizando pago a ${estado}:`, JSON.stringify(error));
     else console.log(`[YAPPY IPN] Pago ${orderId} actualizado a: ${estado}`);
   } catch (e) {
     console.error('[YAPPY IPN] Error:', e.message);
